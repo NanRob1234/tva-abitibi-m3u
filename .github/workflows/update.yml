@@ -33,38 +33,63 @@ jobs:
           python3 - <<'PY'
           from googleapiclient.discovery import build
           import os
+          from datetime import datetime, timezone
 
           API_KEY = os.environ["YOUTUBE_API_KEY"]
           youtube = build("youtube", "v3", developerKey=API_KEY)
 
-          def chercher_video(recherche):
-              req = youtube.search().list(
+          # Chaîne officielle TVA Abitibi-Témiscamingue
+          CHANNEL_ID = "UCOP74lX2SeJsRAJ3iCgxJlA"
+
+          def latest_from_channel(query: str):
+              res = youtube.search().list(
                   part="snippet",
-                  q=recherche,
+                  q=query,
+                  channelId=CHANNEL_ID,
                   type="video",
                   order="date",
                   maxResults=1
-              )
-              res = req.execute()
+              ).execute()
+
               items = res.get("items", [])
-              if items:
-                  return "https://www.youtube.com/watch?v=" + items[0]["id"]["videoId"]
-              return "VIDÉO_NON_TROUVÉE"
+              if not items:
+                  return None
 
-          lien_midi = chercher_video("Abitibi Midi")
-          lien_18h = chercher_video("Abitibi 18h")
+              it = items[0]
+              video_id = it["id"]["videoId"]
+              title = it["snippet"]["title"]
+              published_at = it["snippet"]["publishedAt"]  # ex: 2026-02-27T17:55:00Z
 
-          contenu = f"""#EXTM3U
+              dt = datetime.fromisoformat(published_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+              date_str = dt.strftime("%Y-%m-%d")
 
-          #EXTINF:-1 group-title="TVA Abitibi",TVA Abitibi - Midi
-          {lien_midi}
+              url = f"https://www.youtube.com/watch?v={video_id}"
+              return {"title": title, "date": date_str, "url": url}
 
-          #EXTINF:-1 group-title="TVA Abitibi",TVA Abitibi - 18h
-          {lien_18h}
-          """
+          midi = latest_from_channel("Bulletin TVA MIDI") or latest_from_channel("TVA Abitibi midi")
+          h18  = latest_from_channel("Bulletin TVA 18h")  or latest_from_channel("TVA Abitibi 18h")
+          weekend = latest_from_channel("Revue de la semaine") or latest_from_channel("week-end")
+
+          lines = ["#EXTM3U", ""]
+
+          def add_item(group, fallback_label, item):
+              if not item:
+                  lines.append(f'#EXTINF:-1 group-title="{group}",{fallback_label} - Aucune vidéo trouvée')
+                  lines.append("VIDÉO_NON_TROUVÉE")
+                  lines.append("")
+                  return
+
+              name = f'{item["date"]} - {item["title"]}'
+              lines.append(f'#EXTINF:-1 group-title="{group}",{name}')
+              lines.append(item["url"])
+              lines.append("")
+
+          add_item("TVA Abitibi", "TVA Abitibi - Midi", midi)
+          add_item("TVA Abitibi", "TVA Abitibi - 18h", h18)
+          add_item("TVA Abitibi", "TVA Nouvelles week-end", weekend)
 
           with open("tva.m3u", "w", encoding="utf-8") as f:
-              f.write(contenu)
+              f.write("\n".join(lines))
           PY
 
       - name: Commit et push (seulement si changement)
