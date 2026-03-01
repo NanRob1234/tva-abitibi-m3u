@@ -13,50 +13,42 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Installer dépendances
-        run: |
-          python -m pip install --upgrade pip
-          pip install google-api-python-client
+      - run: pip install google-api-python-client
 
-      - name: Générer index.html et tva.m3u
+      - name: Générer site + m3u
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           python - <<'PY'
           import os
           from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
           from googleapiclient.discovery import build
 
           API_KEY = os.environ["YOUTUBE_API_KEY"]
-
-          # ✅ Ton canal officiel TVA Abitibi (d'après ta page)
           OFFICIAL_CHANNEL_ID = "UC0P74lX2SeJsRAJ3iCgxJIA"
 
           youtube = build("youtube", "v3", developerKey=API_KEY)
 
-          def iso(dt):
-              return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-          now = datetime.now(timezone.utc)
+          now = datetime.now(ZoneInfo("America/Toronto"))
           since = now - timedelta(hours=72)
 
-          # Les sections qu’on veut suivre
+          def iso(dt):
+              return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+
           SECTIONS = [
               ("TVA Abitibi - Midi", "TVA Abitibi Midi"),
               ("TVA Abitibi - 18h", "TVA Abitibi 18h"),
               ("TVA Nouvelles week-end", "TVA Nouvelles week-end"),
           ]
 
-          def search_videos(query, max_results=10):
-              # Recherche limitée au canal officiel + aux 72 dernières heures
+          def search_videos(query):
               req = youtube.search().list(
                   part="snippet",
                   q=query,
@@ -64,132 +56,79 @@ jobs:
                   type="video",
                   order="date",
                   publishedAfter=iso(since),
-                  maxResults=max_results,
+                  maxResults=10,
               )
               res = req.execute()
               out = []
               for it in res.get("items", []):
                   vid = it["id"].get("videoId")
-                  sn = it["snippet"]
                   if not vid:
                       continue
+                  sn = it["snippet"]
                   out.append({
                       "videoId": vid,
-                      "title": sn.get("title", "").strip(),
-                      "publishedAt": sn.get("publishedAt", ""),
+                      "title": sn.get("title",""),
+                      "publishedAt": sn.get("publishedAt",""),
                       "url": f"https://www.youtube.com/watch?v={vid}",
                   })
               return out
 
-          # Collecte + déduplication
-          all_items = []
+          def parse_dt(s):
+              return datetime.fromisoformat(s.replace("Z","+00:00"))
+
+          videos = []
           seen = set()
 
           for label, q in SECTIONS:
-              items = search_videos(q, max_results=10)
-              for v in items:
+              for v in search_videos(q):
                   if v["videoId"] in seen:
                       continue
                   seen.add(v["videoId"])
                   v["section"] = label
-                  all_items.append(v)
+                  videos.append(v)
 
-          # Tri du plus récent au plus vieux
-          def parse_dt(s):
-              try:
-                  return datetime.fromisoformat(s.replace("Z", "+00:00"))
-              except Exception:
-                  return datetime.min.replace(tzinfo=timezone.utc)
+          videos.sort(key=lambda x: parse_dt(x["publishedAt"]), reverse=True)
 
-          all_items.sort(key=lambda x: parse_dt(x["publishedAt"]), reverse=True)
+          # Générer M3U
+          m3u = ["#EXTM3U"]
+          for v in videos:
+              local_time = parse_dt(v["publishedAt"]).astimezone(ZoneInfo("America/Toronto"))
+              dt = local_time.strftime("%Y-%m-%d %H:%M")
+              m3u.append(f'#EXTINF:-1 group-title="TVA Abitibi",{v["section"]} — {dt} — {v["title"]}')
+              m3u.append(v["url"])
+              m3u.append("")
 
-          # Génère M3U (important: TVMate lit un .m3u, pas la page HTML)
-          lines = ["#EXTM3U"]
-          for v in all_items:
-              dt = parse_dt(v["publishedAt"]).strftime("%Y-%m-%d %H:%M UTC")
-              title = v["title"].replace("\n", " ").strip()
-              # EXTINF = titre réel + date
-              lines.append(f'#EXTINF:-1 group-title="TVA Abitibi",{v["section"]} — {dt} — {title}')
-              lines.append(v["url"])
-              lines.append("")  # ligne vide
+          open("tva.m3u","w",encoding="utf-8").write("\n".join(m3u))
 
-          with open("tva.m3u", "w", encoding="utf-8") as f:
-              f.write("\n".join(lines).strip() + "\n")
-
-          # Génère une page HTML simple (GitHub Pages)
-          def esc(s):
-              return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                       .replace('"', "&quot;").replace("'", "&#39;"))
-
-          html_cards = []
-          for v in all_items:
-              dt = parse_dt(v["publishedAt"]).strftime("%Y-%m-%d %H:%M UTC")
-              html_cards.append(f"""
-                <div class="card">
-                  <div class="meta">{esc(v["section"])} — {esc(dt)}</div>
-                  <div class="title">{esc(v["title"])}</div>
-                  <a class="btn" href="{esc(v["url"])}" target="_blank" rel="noopener">Ouvrir sur YouTube</a>
-                </div>
-              """)
-
-          channel_line = f"Chaîne officielle seulement ({OFFICIAL_CHANNEL_ID}). Mis à jour automatiquement."
-          html = f"""<!doctype html>
-          <html lang="fr">
-          <head>
-            <meta charset="utf-8"/>
-            <meta name="viewport" content="width=device-width, initial-scale=1"/>
-            <title>TVA Abitibi — Dernières 72 heures</title>
-            <style>
-              body {{
-                margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-                background: #0b0b0b; color: #f2f2f2;
-              }}
-              .wrap {{ max-width: 980px; margin: 28px auto; padding: 0 16px; }}
-              h1 {{ margin: 0 0 6px; font-size: 34px; }}
-              .sub {{ color: #bdbdbd; margin-bottom: 18px; }}
-              .card {{
-                background: #141414; border: 1px solid #242424;
-                border-radius: 14px; padding: 18px; margin: 14px 0;
-                box-shadow: 0 10px 30px rgba(0,0,0,0.25);
-              }}
-              .meta {{ color: #a8a8a8; font-size: 13px; margin-bottom: 8px; }}
-              .title {{ font-size: 18px; font-weight: 650; margin-bottom: 12px; }}
-              .btn {{
-                display: inline-block; padding: 10px 14px; border-radius: 10px;
-                background: #1f6feb; color: #fff; text-decoration: none; font-weight: 600;
-              }}
-              .footer {{
-                margin-top: 18px; color: #9a9a9a; font-size: 13px;
-              }}
-              code {{ background: #111; padding: 2px 6px; border-radius: 6px; border: 1px solid #222; }}
-            </style>
-          </head>
-          <body>
-            <div class="wrap">
-              <h1>TVA Abitibi — Dernières 72 heures</h1>
-              <div class="sub">{esc(channel_line)}</div>
-
-              {''.join(html_cards) if html_cards else '<div class="card"><div class="title">Aucune vidéo trouvée dans les dernières 72 heures.</div></div>'}
-
-              <div class="footer">
-                Fichier M3U pour TVMate: <code>tva.m3u</code> (utilise le lien RAW dans TVMate).
+          # Générer HTML
+          cards = ""
+          for v in videos:
+              local_time = parse_dt(v["publishedAt"]).astimezone(ZoneInfo("America/Toronto"))
+              dt = local_time.strftime("%Y-%m-%d %H:%M")
+              cards += f"""
+              <div style="background:#111;padding:15px;margin:10px;border-radius:10px;">
+                <div><b>{v['section']}</b> — {dt}</div>
+                <div>{v['title']}</div>
+                <a href="{v['url']}" target="_blank">Ouvrir sur YouTube</a>
               </div>
-            </div>
+              """
+
+          html = f"""
+          <html>
+          <body style="background:#000;color:#fff;font-family:Arial;">
+          <h1>TVA Abitibi - Dernières 72h (Heure Québec)</h1>
+          {cards if cards else "<p>Aucune vidéo trouvée</p>"}
           </body>
           </html>
           """
 
-          with open("index.html", "w", encoding="utf-8") as f:
-              f.write(html)
-
-          print(f"OK: {len(all_items)} vidéos, index.html + tva.m3u générés.")
+          open("index.html","w",encoding="utf-8").write(html)
           PY
 
-      - name: Commit et push (seulement si changement)
+      - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add index.html tva.m3u
-          git diff --cached --quiet || git commit -m "Mise à jour automatique (72h)"
+          git diff --cached --quiet || git commit -m "Update Québec time"
           git push
