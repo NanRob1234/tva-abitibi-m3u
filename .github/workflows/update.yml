@@ -1,83 +1,31 @@
-name: Mise à jour TVA Abitibi (72h) - 30 min
+from googleapiclient.discovery import build
+import os
 
-on:
-  schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch:
+API_KEY = os.environ["YOUTUBE_API_KEY"]
+CHANNEL_ID = "UCOP74lX2SeJsRAJ3iCgxJlA"
 
-permissions:
-  contents: write
+youtube = build("youtube", "v3", developerKey=API_KEY)
 
-jobs:
-  update:
-    runs-on: ubuntu-latest
+req = youtube.search().list(
+    part="snippet",
+    channelId=CHANNEL_ID,
+    type="video",
+    order="date",
+    maxResults=10
+)
 
-    steps:
-      - uses: actions/checkout@v4
+res = req.execute()
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+lines = ["#EXTM3U"]
 
-      - name: Installer dépendances
-        run: pip install google-api-python-client
+for item in res.get("items", []):
+    title = item["snippet"]["title"]
+    vid = item["id"]["videoId"]
+    url = f"https://www.youtube.com/watch?v={vid}"
 
-      - name: Générer M3U
-        env:
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-        run: |
-          python <<EOF
-          from googleapiclient.discovery import build
-          from datetime import datetime, timedelta, timezone
-          import os
+    lines.append(f'#EXTINF:-1 group-title="TVA Abitibi",{title}')
+    lines.append(url)
+    lines.append("")
 
-          API_KEY = os.environ["YOUTUBE_API_KEY"]
-          CHANNEL_ID = "UCOP74lX2SeJsRAJ3iCgxJlA"
-
-          youtube = build("youtube", "v3", developerKey=API_KEY)
-
-          now = datetime.now(timezone.utc)
-          cutoff = now - timedelta(hours=72)
-
-          # fetch latest videos from the channel
-          req = youtube.search().list(
-              part="snippet",
-              channelId=CHANNEL_ID,
-              type="video",
-              order="date",
-              maxResults=15
-          )
-          res = req.execute()
-
-          lines = ["#EXTM3U"]
-
-          for item in res.get("items", []):
-              sn = item["snippet"]
-              published = datetime.fromisoformat(sn["publishedAt"].replace("Z","+00:00"))
-              if published < cutoff:
-                  continue
-
-              title = sn["title"].replace("\n"," ").strip()
-              vid = item["id"]["videoId"]
-              url = f"https://www.youtube.com/watch?v={vid}"
-
-              # add video to playlist
-              lines.append(f'#EXTINF:-1 group-title="TVA Abitibi",{title}')
-              lines.append(url)
-              lines.append("")
-
-          if len(lines) == 1:
-              lines.append('#EXTINF:-1 group-title="TVA Abitibi",Aucune vidéo récente')
-              lines.append("https://www.youtube.com/channel/"+CHANNEL_ID)
-
-          with open("tva.m3u","w",encoding="utf-8") as f:
-              f.write("\n".join(lines).strip())
-          EOF
-
-      - name: Commit et push
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tva.m3u
-          git diff --cached --quiet || git commit -m "Update M3U"
-          git push
+with open("tva.m3u","w",encoding="utf-8") as f:
+    f.write("\n".join(lines))
