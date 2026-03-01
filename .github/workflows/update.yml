@@ -1,31 +1,74 @@
-from googleapiclient.discovery import build
-import os
+name: Mise à jour TVA Abitibi (72h) - 30 min
 
-API_KEY = os.environ["YOUTUBE_API_KEY"]
-CHANNEL_ID = "UCOP74lX2SeJsRAJ3iCgxJlA"
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
-youtube = build("youtube", "v3", developerKey=API_KEY)
+jobs:
+  update:
+    runs-on: ubuntu-latest
 
-req = youtube.search().list(
-    part="snippet",
-    channelId=CHANNEL_ID,
-    type="video",
-    order="date",
-    maxResults=10
-)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-res = req.execute()
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-lines = ["#EXTM3U"]
+      - name: Install dependencies
+        run: pip install google-api-python-client pytz
 
-for item in res.get("items", []):
-    title = item["snippet"]["title"]
-    vid = item["id"]["videoId"]
-    url = f"https://www.youtube.com/watch?v={vid}"
+      - name: Generate M3U
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          python <<EOF
+          from googleapiclient.discovery import build
+          from datetime import datetime, timedelta
+          import os
+          import pytz
 
-    lines.append(f'#EXTINF:-1 group-title="TVA Abitibi",{title}')
-    lines.append(url)
-    lines.append("")
+          API_KEY = os.environ["YOUTUBE_API_KEY"]
+          CHANNEL_ID = "UCOP74lX2SeJsRAJ3iCgXJ1A"
 
-with open("tva.m3u","w",encoding="utf-8") as f:
-    f.write("\n".join(lines))
+          youtube = build("youtube", "v3", developerKey=API_KEY)
+
+          now = datetime.utcnow()
+          after = now - timedelta(hours=72)
+
+          req = youtube.search().list(
+              part="snippet",
+              channelId=CHANNEL_ID,
+              type="video",
+              order="date",
+              publishedAfter=after.isoformat("T") + "Z",
+              maxResults=20
+          )
+
+          res = req.execute()
+
+          lines = ["#EXTM3U"]
+
+          for item in res.get("items", []):
+              title = item["snippet"]["title"]
+              vid = item["id"]["videoId"]
+              url = f"https://www.youtube.com/watch?v={vid}"
+
+              lines.append(f'#EXTINF:-1 group-title="TVA Abitibi",{title}')
+              lines.append(url)
+              lines.append("")
+
+          with open("tva.m3u", "w", encoding="utf-8") as f:
+              f.write("\n".join(lines))
+          EOF
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add tva.m3u
+          git commit -m "Mise à jour automatique 30 min" || echo "No changes"
+          git push
