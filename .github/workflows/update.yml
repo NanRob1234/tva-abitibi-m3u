@@ -1,8 +1,8 @@
-name: Mise à jour TVA Abitibi
+name: Mise à jour TVA Abitibi (72h)
 
 on:
   schedule:
-    - cron: "0 12 * * *"
+    - cron: "0 * * * *"   # chaque heure (tu peux changer)
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,6 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -26,76 +25,122 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-api-python-client
 
-      - name: Générer le fichier M3U
+      - name: Générer page TVA (72h)
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           python3 - <<'PY'
           from googleapiclient.discovery import build
           import os
-          from datetime import datetime, timezone
+          from datetime import datetime, timezone, timedelta
+          import html
 
           API_KEY = os.environ["YOUTUBE_API_KEY"]
           youtube = build("youtube", "v3", developerKey=API_KEY)
 
-          # Chaîne officielle TVA Abitibi-Témiscamingue
-          CHANNEL_ID = "UCOP74lX2SeJsRAJ3iCgxJlA"
+          CHANNEL_ID = "UCOP74lX2SeJsRAJ3iCgxJlA"  # TVA Abitibi-Témiscamingue (officiel)
 
-          def latest_from_channel(query: str):
+          cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
+
+          queries = [
+              ("Bulletin TVA MIDI", "TVA Abitibi - Midi"),
+              ("Bulletin TVA 18h", "TVA Abitibi - 18h"),
+              ("Revue de la semaine", "TVA Nouvelles week-end"),
+              ("week-end", "TVA Nouvelles week-end (alt)"),
+          ]
+
+          def iso_to_dt(iso):
+              return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+          def search_recent(query, max_results=10):
               res = youtube.search().list(
                   part="snippet",
                   q=query,
                   channelId=CHANNEL_ID,
                   type="video",
                   order="date",
-                  maxResults=1
+                  maxResults=max_results
               ).execute()
 
-              items = res.get("items", [])
-              if not items:
-                  return None
+              out = []
+              for it in res.get("items", []):
+                  sn = it["snippet"]
+                  published = iso_to_dt(sn["publishedAt"])
+                  if published < cutoff:
+                      continue
+                  out.append({
+                      "title": sn["title"],
+                      "published": published,
+                      "url": f'https://www.youtube.com/watch?v={it["id"]["videoId"]}',
+                      "query": query
+                  })
+              return out
 
-              it = items[0]
-              video_id = it["id"]["videoId"]
-              title = it["snippet"]["title"]
-              published_at = it["snippet"]["publishedAt"]  # ex: 2026-02-27T17:55:00Z
+          # Collecte (dédupe par URL)
+          videos = []
+          seen = set()
+          for q, label in queries:
+              for v in search_recent(q, max_results=12):
+                  if v["url"] in seen:
+                      continue
+                  seen.add(v["url"])
+                  v["label"] = label
+                  videos.append(v)
 
-              dt = datetime.fromisoformat(published_at.replace("Z", "+00:00")).astimezone(timezone.utc)
-              date_str = dt.strftime("%Y-%m-%d")
+          # Tri par date décroissante
+          videos.sort(key=lambda x: x["published"], reverse=True)
 
-              url = f"https://www.youtube.com/watch?v={video_id}"
-              return {"title": title, "date": date_str, "url": url}
+          # HTML simple
+          def fmt_dt(dt):
+              return dt.strftime("%Y-%m-%d %H:%M UTC")
 
-          midi = latest_from_channel("Bulletin TVA MIDI") or latest_from_channel("TVA Abitibi midi")
-          h18  = latest_from_channel("Bulletin TVA 18h")  or latest_from_channel("TVA Abitibi 18h")
-          weekend = latest_from_channel("Revue de la semaine") or latest_from_channel("week-end")
+          rows = []
+          for v in videos:
+              title = html.escape(v["title"])
+              label = html.escape(v["label"])
+              date = fmt_dt(v["published"])
+              url = html.escape(v["url"])
+              rows.append(f"""
+                <div class="card">
+                  <div class="meta">{label} — {date}</div>
+                  <div class="title">{title}</div>
+                  <a class="btn" href="{url}" target="_blank" rel="noopener">Ouvrir sur YouTube</a>
+                </div>
+              """)
 
-          lines = ["#EXTM3U", ""]
+          page = f"""<!doctype html>
+          <html lang="fr">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>TVA Abitibi — Dernières 72h</title>
+            <style>
+              body {{ font-family: Arial, sans-serif; margin: 20px; background:#111; color:#eee; }}
+              h1 {{ margin: 0 0 6px; }}
+              .sub {{ opacity: .8; margin-bottom: 16px; }}
+              .card {{ background:#1c1c1c; border:1px solid #333; border-radius:12px; padding:14px; margin:12px 0; }}
+              .meta {{ font-size: 14px; opacity:.8; margin-bottom:8px; }}
+              .title {{ font-size: 18px; margin-bottom:10px; line-height:1.2; }}
+              .btn {{ display:inline-block; padding:10px 12px; border-radius:10px; background:#2b6cff; color:white; text-decoration:none; }}
+              .btn:visited {{ color:white; }}
+            </style>
+          </head>
+          <body>
+            <h1>TVA Abitibi — Dernières 72 heures</h1>
+            <div class="sub">Chaîne officielle seulement (UCOP74lX2SeJsRAJ3iCgxJlA). Mis à jour automatiquement.</div>
+            {''.join(rows) if rows else "<p>Aucune vidéo trouvée dans les dernières 72 heures.</p>"}
+          </body>
+          </html>
+          """
 
-          def add_item(group, fallback_label, item):
-              if not item:
-                  lines.append(f'#EXTINF:-1 group-title="{group}",{fallback_label} - Aucune vidéo trouvée')
-                  lines.append("VIDÉO_NON_TROUVÉE")
-                  lines.append("")
-                  return
-
-              name = f'{item["date"]} - {item["title"]}'
-              lines.append(f'#EXTINF:-1 group-title="{group}",{name}')
-              lines.append(item["url"])
-              lines.append("")
-
-          add_item("TVA Abitibi", "TVA Abitibi - Midi", midi)
-          add_item("TVA Abitibi", "TVA Abitibi - 18h", h18)
-          add_item("TVA Abitibi", "TVA Nouvelles week-end", weekend)
-
-          with open("tva.m3u", "w", encoding="utf-8") as f:
-              f.write("\n".join(lines))
+          with open("index.html", "w", encoding="utf-8") as f:
+              f.write(page)
           PY
 
-      - name: Commit et push (seulement si changement)
+      - name: Commit et push (si changement)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tva.m3u
-          git diff --cached --quiet || git commit -m "Mise à jour automatique"
+          git add index.html
+          git diff --cached --quiet || git commit -m "MAJ page TVA (72h)"
           git push
