@@ -19,116 +19,64 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install google-api-python-client
+      - name: Installer dépendances
+        run: pip install google-api-python-client
 
-      - name: Générer site + m3u
+      - name: Générer M3U
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
-          python - <<'PY'
-          import os
-          from datetime import datetime, timedelta, timezone
-          from zoneinfo import ZoneInfo
+          python <<EOF
           from googleapiclient.discovery import build
+          from datetime import datetime, timedelta, timezone
+          import os
 
           API_KEY = os.environ["YOUTUBE_API_KEY"]
-          OFFICIAL_CHANNEL_ID = "UC0P74lX2SeJsRAJ3iCgxJIA"
+          CHANNEL_ID = "UCOP74IX2SeJsRAJ3lCgXJIA"
 
           youtube = build("youtube", "v3", developerKey=API_KEY)
 
-          now = datetime.now(ZoneInfo("America/Toronto"))
-          since = now - timedelta(hours=72)
+          now = datetime.now(timezone.utc)
+          limit = now - timedelta(hours=72)
 
-          def iso(dt):
-              return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+          req = youtube.search().list(
+              part="snippet",
+              channelId=CHANNEL_ID,
+              order="date",
+              maxResults=15,
+              type="video"
+          )
 
-          SECTIONS = [
-              ("TVA Abitibi - Midi", "TVA Abitibi Midi"),
-              ("TVA Abitibi - 18h", "TVA Abitibi 18h"),
-              ("TVA Nouvelles week-end", "TVA Nouvelles week-end"),
-          ]
+          res = req.execute()
 
-          def search_videos(query):
-              req = youtube.search().list(
-                  part="snippet",
-                  q=query,
-                  channelId=OFFICIAL_CHANNEL_ID,
-                  type="video",
-                  order="date",
-                  publishedAfter=iso(since),
-                  maxResults=10,
+          lines = ["#EXTM3U"]
+
+          for item in res.get("items", []):
+              published = datetime.fromisoformat(
+                  item["snippet"]["publishedAt"].replace("Z","+00:00")
               )
-              res = req.execute()
-              out = []
-              for it in res.get("items", []):
-                  vid = it["id"].get("videoId")
-                  if not vid:
-                      continue
-                  sn = it["snippet"]
-                  out.append({
-                      "videoId": vid,
-                      "title": sn.get("title",""),
-                      "publishedAt": sn.get("publishedAt",""),
-                      "url": f"https://www.youtube.com/watch?v={vid}",
-                  })
-              return out
 
-          def parse_dt(s):
-              return datetime.fromisoformat(s.replace("Z","+00:00"))
+              if published >= limit:
+                  title = item["snippet"]["title"]
+                  video_id = item["id"]["videoId"]
+                  url = f"https://www.youtube.com/watch?v={video_id}"
 
-          videos = []
-          seen = set()
+                  lines.append(f'#EXTINF:-1 group-title="TVA Abitibi",{title}')
+                  lines.append(url)
+                  lines.append("")
 
-          for label, q in SECTIONS:
-              for v in search_videos(q):
-                  if v["videoId"] in seen:
-                      continue
-                  seen.add(v["videoId"])
-                  v["section"] = label
-                  videos.append(v)
+          if len(lines) == 1:
+              lines.append('#EXTINF:-1 group-title="TVA Abitibi",Aucune vidéo récente')
+              lines.append("https://www.youtube.com/@tvaabitibi")
 
-          videos.sort(key=lambda x: parse_dt(x["publishedAt"]), reverse=True)
-
-          # Générer M3U
-          m3u = ["#EXTM3U"]
-          for v in videos:
-              local_time = parse_dt(v["publishedAt"]).astimezone(ZoneInfo("America/Toronto"))
-              dt = local_time.strftime("%Y-%m-%d %H:%M")
-              m3u.append(f'#EXTINF:-1 group-title="TVA Abitibi",{v["section"]} — {dt} — {v["title"]}')
-              m3u.append(v["url"])
-              m3u.append("")
-
-          open("tva.m3u","w",encoding="utf-8").write("\n".join(m3u))
-
-          # Générer HTML
-          cards = ""
-          for v in videos:
-              local_time = parse_dt(v["publishedAt"]).astimezone(ZoneInfo("America/Toronto"))
-              dt = local_time.strftime("%Y-%m-%d %H:%M")
-              cards += f"""
-              <div style="background:#111;padding:15px;margin:10px;border-radius:10px;">
-                <div><b>{v['section']}</b> — {dt}</div>
-                <div>{v['title']}</div>
-                <a href="{v['url']}" target="_blank">Ouvrir sur YouTube</a>
-              </div>
-              """
-
-          html = f"""
-          <html>
-          <body style="background:#000;color:#fff;font-family:Arial;">
-          <h1>TVA Abitibi - Dernières 72h (Heure Québec)</h1>
-          {cards if cards else "<p>Aucune vidéo trouvée</p>"}
-          </body>
-          </html>
-          """
-
-          open("index.html","w",encoding="utf-8").write(html)
-          PY
+          with open("tva.m3u","w",encoding="utf-8") as f:
+              f.write("\n".join(lines))
+          EOF
 
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html tva.m3u
-          git diff --cached --quiet || git commit -m "Update Québec time"
+          git add tva.m3u
+          git commit -m "Update M3U" || echo "No changes"
           git push
